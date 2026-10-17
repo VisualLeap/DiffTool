@@ -8,6 +8,7 @@ namespace DiffTool
     public sealed class RecentRepositories
     {
         private readonly string settingsPath;
+        internal string SettingsDirectory { get { return Path.GetDirectoryName(Path.GetFullPath(settingsPath)); } }
         private readonly List<string> paths = new List<string>();
         public IList<string> Paths { get { return paths.AsReadOnly(); } }
         public string LastPath { get { return paths.Count == 0 ? null : paths[0]; } }

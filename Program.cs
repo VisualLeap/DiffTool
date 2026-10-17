@@ -63,6 +63,7 @@ namespace DiffTool
         private readonly CheckBox fullFileToggle = new CheckBox();
         private readonly ToolTip tooltip = new ToolTip();
         private readonly RecentRepositories recentRepositories;
+        private readonly string windowBoundsPath;
         private readonly ContextMenuStrip recentMenu = new ContextMenuStrip();
         private readonly Button recentButton;
         private GitRepository repository;
@@ -83,6 +84,7 @@ namespace DiffTool
         public DiffForm(string initialPath, RecentRepositories recentRepositories)
         {
             this.recentRepositories = recentRepositories;
+            windowBoundsPath = Path.Combine(recentRepositories.SettingsDirectory, "window-bounds.txt");
             using (var stream = typeof(DiffForm).Assembly.GetManifestResourceStream("DiffTool.AppIcon"))
             using (var icon = new Icon(stream, SystemInformation.IconSize))
                 appIcon = (Icon)icon.Clone();
@@ -91,7 +93,7 @@ namespace DiffTool
             Size = new Size(1280, 820);
             MinimumSize = new Size(860, 560);
             StartPosition = FormStartPosition.CenterScreen;
-            WindowState = FormWindowState.Maximized;
+            WindowState = FormWindowState.Normal;
             BackColor = Theme.Canvas;
             ForeColor = Theme.Text;
             Font = new Font("Segoe UI", 10f);
@@ -638,6 +640,61 @@ namespace DiffTool
                 if (!IsDisposed && version == diffVersion) diffView.ShowMessage("Could not load this diff", error.Message);
             }
             finally { if (!IsDisposed && version == diffVersion) IsIdle = true; }
+        }
+
+        protected override void OnLoad(EventArgs e)
+        {
+            try
+            {
+                if (File.Exists(windowBoundsPath))
+                {
+                    string[] values = File.ReadAllLines(windowBoundsPath);
+                    int x, y, width, height;
+                    if (values.Length == 4 && int.TryParse(values[0], out x) && int.TryParse(values[1], out y) &&
+                        int.TryParse(values[2], out width) && int.TryParse(values[3], out height) &&
+                        Math.Abs((long)x) <= 1000000 && Math.Abs((long)y) <= 1000000 &&
+                        width > 0 && width <= 100000 && height > 0 && height <= 100000)
+                    {
+                        // Keep the saved window accessible if a monitor was removed or resized.
+                        Rectangle area = Screen.FromRectangle(new Rectangle(x, y, width, height)).WorkingArea;
+                        width = Math.Max(MinimumSize.Width, Math.Min(width, area.Width));
+                        height = Math.Max(MinimumSize.Height, Math.Min(height, area.Height));
+                        x = Math.Max(area.Left, Math.Min(x, area.Right - width));
+                        y = Math.Max(area.Top, Math.Min(y, area.Bottom - height));
+                        StartPosition = FormStartPosition.Manual;
+                        Bounds = new Rectangle(x, y, width, height);
+                    }
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            base.OnLoad(e);
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            // Closing while maximized/minimized still remembers the normal window bounds.
+            Rectangle bounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+            string temporary = windowBoundsPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                if (bounds.Width > 0 && bounds.Height > 0)
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(windowBoundsPath));
+                    File.WriteAllLines(temporary, new[] { bounds.X.ToString(), bounds.Y.ToString(), bounds.Width.ToString(), bounds.Height.ToString() });
+                    if (File.Exists(windowBoundsPath)) File.Replace(temporary, windowBoundsPath, null);
+                    else File.Move(temporary, windowBoundsPath);
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            finally
+            {
+                try { if (File.Exists(temporary)) File.Delete(temporary); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+            base.OnFormClosed(e);
         }
 
         protected override void Dispose(bool disposing)
