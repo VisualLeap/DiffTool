@@ -268,29 +268,24 @@ namespace DiffTool
             detailHeader.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             detailHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             detailHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 102));
-            var titleStack = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1, Margin = Padding.Empty };
-            titleStack.RowStyles.Add(new RowStyle(SizeType.Percent, 55));
-            titleStack.RowStyles.Add(new RowStyle(SizeType.Percent, 45));
+            var fileHeading = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
             fileLabel.Text = "File preview";
-            fileLabel.Dock = DockStyle.None;
             fileLabel.AutoEllipsis = true;
             fileLabel.Font = new Font("Segoe UI", 10f, FontStyle.Bold);
-            var fileHeading = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
             fileHeading.Controls.Add(fileLabel);
-            titleStack.Controls.Add(fileHeading);
             lineStats.Text = "Unified diff · old and new line numbers";
-            lineStats.Dock = DockStyle.Fill;
+            lineStats.AutoEllipsis = true;
             lineStats.ForeColor = Theme.Muted;
             lineStats.Font = new Font("Segoe UI", 9f);
-            titleStack.Controls.Add(lineStats);
-            detailHeader.Controls.Add(titleStack, 0, 0);
+            fileHeading.Controls.Add(lineStats);
+            detailHeader.Controls.Add(fileHeading, 0, 0);
             fullFileToggle.Text = "Full file";
             fullFileToggle.Checked = true;
             fullFileToggle.Appearance = Appearance.Button;
             fullFileToggle.TextAlign = ContentAlignment.MiddleCenter;
             fullFileToggle.FlatStyle = FlatStyle.Flat;
             fullFileToggle.FlatAppearance.BorderColor = Theme.Border;
-            fullFileToggle.FlatAppearance.CheckedBackColor = Theme.HunkBackground;
+            fullFileToggle.FlatAppearance.CheckedBackColor = Color.FromArgb(55, 76, 105);
             fullFileToggle.Size = new Size(96, 32);
             fullFileToggle.Anchor = AnchorStyles.Right;
             fullFileToggle.Cursor = Cursors.Hand;
@@ -299,7 +294,7 @@ namespace DiffTool
             detailHeader.Controls.Add(fullFileToggle, 1, 0);
             copyButton = MakeButton("Copy diff");
             copyButton.Width = 96;
-            copyButton.Height = 26;
+            copyButton.Height = refreshButton.Height;
             copyButton.Enabled = false;
             copyButton.Click += delegate
             {
@@ -309,13 +304,30 @@ namespace DiffTool
             fileHeading.Controls.Add(copyButton);
             EventHandler arrangeFileHeading = delegate
             {
-                int availableWidth = Math.Max(1, fileHeading.ClientSize.Width - copyButton.Width - 8);
-                int textWidth = TextRenderer.MeasureText(fileLabel.Text, fileLabel.Font, new Size(int.MaxValue, fileHeading.Height), TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix).Width;
-                fileLabel.SetBounds(0, 0, Math.Min(availableWidth, textWidth), fileHeading.ClientSize.Height);
-                copyButton.Location = new Point(fileLabel.Right + 8, Math.Max(0, (fileHeading.ClientSize.Height - copyButton.Height) / 2));
+                copyButton.Height = fullFileToggle.Height = refreshButton.Height;
+                int availableWidth = Math.Max(1, fileHeading.ClientSize.Width - copyButton.Width - 13);
+                int textWidth;
+                using (Graphics graphics = fileHeading.CreateGraphics())
+                {
+                    var size = new Size(int.MaxValue, fileHeading.Height);
+                    var flags = TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
+                    textWidth = Math.Max(
+                        TextRenderer.MeasureText(graphics, fileLabel.Text, fileLabel.Font, size, flags).Width,
+                        TextRenderer.MeasureText(graphics, lineStats.Text, lineStats.Font, size, flags).Width);
+                }
+                int labelWidth = Math.Min(availableWidth, textWidth);
+                int titleHeight = (int)(fileHeading.ClientSize.Height * 0.55);
+                fileLabel.SetBounds(0, 0, labelWidth, titleHeight);
+                lineStats.SetBounds(0, titleHeight, labelWidth, fileHeading.ClientSize.Height - titleHeight);
+                copyButton.Location = new Point(labelWidth + 13, Math.Max(0, (fileHeading.ClientSize.Height - copyButton.Height) / 2));
             };
             fileHeading.Resize += arrangeFileHeading;
             fileLabel.TextChanged += arrangeFileHeading;
+            lineStats.TextChanged += arrangeFileHeading;
+            fileLabel.FontChanged += arrangeFileHeading;
+            lineStats.FontChanged += arrangeFileHeading;
+            refreshButton.SizeChanged += arrangeFileHeading;
+            Shown += arrangeFileHeading;
             arrangeFileHeading(null, EventArgs.Empty);
             detail.Controls.Add(detailHeader, 0, 0);
             diffView.Dock = DockStyle.Fill;
