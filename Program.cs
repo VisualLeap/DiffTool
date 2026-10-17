@@ -120,11 +120,12 @@ namespace DiffTool
             repositoryLabel.AutoEllipsis = true;
             heading.Controls.Add(repositoryLabel);
             var branchRow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = Padding.Empty };
-            branchRow.Controls.Add(new Label { Text = "Branch", ForeColor = Theme.Muted, AutoSize = false, Width = 64, Margin = new Padding(0, 3, 12, 0) });
+            var branchCaption = new Label { Text = "Branch", ForeColor = Theme.Muted, AutoSize = true, Margin = new Padding(0, 3, 12, 0) };
+            branchRow.Controls.Add(branchCaption);
             branchBox.DropDownStyle = ComboBoxStyle.DropDownList;
             branchBox.Width = 300;
             branchBox.DropDownWidth = 650;
-            branchBox.Font = new Font("Segoe UI", 9f);
+            ConfigureComparisonBox(branchBox);
             branchBox.BackColor = Theme.Panel;
             branchBox.ForeColor = Theme.Blue;
             branchBox.FlatStyle = FlatStyle.Flat;
@@ -152,8 +153,21 @@ namespace DiffTool
             layout.Controls.Add(header, 0, 0);
 
             var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = Padding.Empty, Padding = new Padding(0, 8, 0, 0) };
-            toolbar.Controls.Add(new Label { Text = "Compare", AutoSize = false, Width = 64, Margin = new Padding(0, 5, 12, 0), ForeColor = Theme.Muted });
+            var compareCaption = new Label { Text = "Compare", AutoSize = true, Margin = new Padding(0, 5, 12, 0), ForeColor = Theme.Muted };
+            toolbar.Controls.Add(compareCaption);
+            EventHandler alignComparisonLabels = delegate
+            {
+                branchCaption.MinimumSize = Size.Empty;
+                compareCaption.MinimumSize = Size.Empty;
+                int labelWidth = Math.Max(branchCaption.PreferredWidth, compareCaption.PreferredWidth);
+                branchCaption.MinimumSize = compareCaption.MinimumSize = new Size(labelWidth, 0);
+            };
+            branchCaption.FontChanged += alignComparisonLabels;
+            compareCaption.FontChanged += alignComparisonLabels;
+            Shown += alignComparisonLabels;
+            alignComparisonLabels(null, EventArgs.Empty);
             scopeBox.DropDownStyle = ComboBoxStyle.DropDownList;
+            ConfigureComparisonBox(scopeBox);
             scopeBox.Items.AddRange(new object[] { "All working changes", "Staged changes", "Unstaged changes" });
             scopeBox.Width = 300;
             scopeBox.DropDownWidth = 950;
@@ -166,21 +180,41 @@ namespace DiffTool
             scopeBox.SelectedIndex = 0;
             toolbar.Controls.Add(scopeBox);
             refreshButton = MakeButton("Refresh  ·  F5");
+            refreshButton.Width = 160;
             refreshButton.Margin = new Padding(12, 0, 0, 0);
             refreshButton.Click += async delegate { await RefreshView(); };
-            toolbar.Controls.Add(refreshButton);
+            branchRow.Controls.Add(refreshButton);
             olderButton = MakeButton("Load older commits");
             olderButton.Width = 160;
             olderButton.Margin = new Padding(12, 0, 0, 0);
             olderButton.Visible = false;
             olderButton.Click += async delegate { await LoadCommits(true); };
             toolbar.Controls.Add(olderButton);
+            bool arrangingComparisonButtons = false;
             EventHandler alignComparisonButtons = delegate
             {
-                refreshButton.Height = scopeBox.Height;
-                olderButton.Height = scopeBox.Height;
+                if (arrangingComparisonButtons) return;
+                arrangingComparisonButtons = true;
+                try
+                {
+                    // Native dropdown heights follow ItemHeight, not an assigned Height.
+                    // Leave enough room for the flat buttons' text and border padding.
+                    int controlHeight = Math.Max(refreshButton.PreferredSize.Height, olderButton.PreferredSize.Height);
+                    int itemHeight = Math.Max(Font.Height + 6, controlHeight - 6);
+                    branchBox.ItemHeight = scopeBox.ItemHeight = itemHeight;
+                    refreshButton.Height = branchBox.Height;
+                    olderButton.Height = scopeBox.Height;
+                    heading.RowStyles[2].Height = branchBox.Height;
+                    layout.RowStyles[0].Height = heading.RowStyles[0].Height + heading.RowStyles[1].Height + branchBox.Height;
+                    layout.RowStyles[1].Height = scopeBox.Height + toolbar.Padding.Top + 12;
+                }
+                finally { arrangingComparisonButtons = false; }
             };
+            branchBox.SizeChanged += alignComparisonButtons;
             scopeBox.SizeChanged += alignComparisonButtons;
+            Shown += alignComparisonButtons;
+            branchRow.Layout += delegate { alignComparisonButtons(null, EventArgs.Empty); };
+            toolbar.Layout += delegate { alignComparisonButtons(null, EventArgs.Empty); };
             alignComparisonButtons(null, EventArgs.Empty);
             layout.Controls.Add(toolbar, 0, 1);
             var split = new SplitContainer { Dock = DockStyle.Fill, BackColor = Theme.Border, SplitterWidth = 5, Margin = Padding.Empty, Size = new Size(1200, 580) };
@@ -305,8 +339,8 @@ namespace DiffTool
             };
             Shown += async delegate
             {
-                // Start at 31.05% of the available width.
-                split.SplitterDistance = Math.Max(split.Panel1MinSize, Math.Min(split.Width - split.Panel2MinSize - split.SplitterWidth, (int)Math.Round(split.Width * 0.3105)));
+                // Start at 34.155% of the available width.
+                split.SplitterDistance = Math.Max(split.Panel1MinSize, Math.Min(split.Width - split.Panel2MinSize - split.SplitterWidth, (int)Math.Round(split.Width * 0.34155)));
                 if (!string.IsNullOrWhiteSpace(initialPath)) await OpenRepository(initialPath);
                 else if (recentRepositories.LastPath != null) await OpenRepository(recentRepositories.LastPath, false);
                 else
@@ -316,6 +350,23 @@ namespace DiffTool
                 }
             };
             IsIdle = true;
+        }
+
+        private static void ConfigureComparisonBox(ComboBox box)
+        {
+            // Owner drawing lets the collapsed dropdown use the same comfortable
+            // height as its neighboring button while retaining native navigation.
+            box.DrawMode = DrawMode.OwnerDrawFixed;
+            box.DrawItem += delegate(object sender, DrawItemEventArgs e)
+            {
+                e.DrawBackground();
+                string text = e.Index >= 0 ? box.GetItemText(box.Items[e.Index]) : box.Text;
+                var bounds = new Rectangle(e.Bounds.X + 2, e.Bounds.Y, Math.Max(0, e.Bounds.Width - 4), e.Bounds.Height);
+                TextRenderer.DrawText(e.Graphics, text, box.Font, bounds, e.ForeColor,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
+                    TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                e.DrawFocusRectangle();
+            };
         }
 
         private static Button MakeButton(string text)
