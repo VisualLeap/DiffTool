@@ -46,9 +46,8 @@ namespace DiffTool
                 bool added = Status == 'A' || Status == 'C';
                 if (added) { size /= 1024; unit = 1; }
                 while (size >= 1024 && unit < units.Length - 1) { size /= 1024; unit++; }
-                string sizeText = size.ToString(added && unit == 1 ? "0.##" : "0.#", System.Globalization.CultureInfo.InvariantCulture) + " " + units[unit];
-                if (added && SizeBytes.Value > 0 && size < 0.01) sizeText = "<0.01 KB";
-                return sizeText;
+                size = Math.Ceiling(size * 10) / 10;
+                return size.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + " " + units[unit];
             }
         }
         public string DisplayPath
