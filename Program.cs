@@ -245,7 +245,6 @@ namespace DiffTool
             tooltip.SetToolTip(filterBox, "Filter files by path (Ctrl+F)");
             sidebar.Controls.Add(filterBox, 0, 1);
             fileList.Dock = DockStyle.Fill;
-            fileList.BorderStyle = BorderStyle.None;
             fileList.BackColor = Theme.Panel;
             fileList.ForeColor = Theme.Text;
             fileList.Margin = Padding.Empty;

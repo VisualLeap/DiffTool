@@ -21,8 +21,8 @@ To open a particular repository from a terminal:
 Requires Windows with .NET Framework 4.5 or later and Git on PATH. No SDK, package downloads, server, or browser is needed. Build with the included .NET Framework compiler:
 
 ```powershell
-.\build.ps1
-.\build.ps1 -Test
+.\build.bat
+.\build.bat -Test
 ```
 
 Build output and test screenshots go in `bin/`, which is excluded from Git. Repository history and user preferences stay in Local AppData, outside the project.
@@ -45,7 +45,8 @@ The application icon is `assets/DiffTool.ico`; replace that file and rebuild to 
 - The app opens in a normal window and remembers its last position and size across launches.
 - Filter the list by path, select a file, and scroll the diff. The file-list pane starts at 34.155% of the window width (subject to minimum pane sizes). Drag the divider to resize the panes. The two number columns show the old and new line numbers.
 - Toggle **Full file** at the far right of the file header to include all unchanged lines alongside red deletions and green additions. Turn it off to return to changes with nearby context. The toggle carries across file selections and comparison views.
-- The right-hand minimap shows tiny strokes for file contents, with red deletions and green additions. Click to jump or drag the highlighted viewport to scroll; mouse-wheel and keyboard scrolling also work. It follows the current compact/full-file view.
+- The right-hand minimap shows tiny strokes for file contents, with red deletions and green additions. Click to jump or drag the highlighted viewport to scroll; mouse-wheel, trackpad, and keyboard scrolling also work. It follows the current compact/full-file view.
+- Both panes and their minimaps use the same direct, pixel-level wheel/trackpad scrolling. Every input event moves the view immediately, retaining fractional movement and following the Windows line/page scrolling setting. There is no added animation or momentum; dragging and keyboard navigation also respond directly.
 - Long source lines use a dark horizontal scrollbar. Drag the thumb or click the track; when focused, arrow keys, Page Up/Down, Home, and End also scroll horizontally.
 - **Copy diff**, beside the filename, copies the selected file's full diff. **F5** refreshes after you change files outside the app. **Ctrl+O** opens a repository; **Ctrl+F** focuses the filter.
 

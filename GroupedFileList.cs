@@ -7,7 +7,7 @@ using System.Windows.Forms;
 
 namespace DiffTool
 {
-    internal sealed class GroupedFileList : ListBox
+    internal sealed class GroupedFileList : Control
     {
         private sealed class Row
         {
@@ -25,37 +25,93 @@ namespace DiffTool
         private string filter = "";
         private string selectedPath;
         private bool rebuilding;
-        private int lastSelection = -1;
         private int hovered = -1;
-        private int wheelRemainder;
+        private bool draggingSelection;
+        private readonly List<Row> Items = new List<Row>();
+        private int[] rowOffsets = new int[1];
+        private int selectedIndex = -1;
+        private double scrollOffset;
+        private string searchPrefix = "";
+        private int searchTime;
+        private int TotalHeight { get { return rowOffsets[rowOffsets.Length - 1]; } }
+        private int MaxOffset { get { return Math.Max(0, TotalHeight - ClientSize.Height); } }
+        private int FileRowHeight { get { return Math.Max(20, Font.Height + 2); } }
+        private Row SelectedItem { get { return selectedIndex < 0 ? null : Items[selectedIndex]; } }
         private Control columnHeader;
         private int sortColumn = -1;
         private bool sortDescending;
         private FileListMinimap minimap;
+        public event EventHandler SelectedIndexChanged;
         public int FileCount { get; private set; }
         public FileChange SelectedChange { get { var row = SelectedItem as Row; return row == null ? null : row.File; } }
 
         public GroupedFileList()
         {
-            DrawMode = DrawMode.OwnerDrawVariable;
-            IntegralHeight = false;
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+            TabStop = true;
+            AccessibleRole = AccessibleRole.List;
         }
 
-        protected override CreateParams CreateParams
+        private int GetItemHeight(int index)
         {
-            get { CreateParams parameters = base.CreateParams; parameters.Style &= ~0x00200000; return parameters; }
+            Row row = Items[index];
+            return row.Gap ? Math.Max(4, Font.Height / 3) : row.File == null ? Math.Max(20, sectionFont.Height + 2) : FileRowHeight;
         }
 
-        protected override void WndProc(ref Message message)
+        private Rectangle GetItemRectangle(int index)
         {
-            base.WndProc(ref message);
-            if (minimap != null && (message.Msg == 0x0197 || message.Msg == 0x0186 || message.Msg == 0x0100 || message.Msg == 0x020A || message.Msg == 0x0115))
-                minimap.Invalidate();
+            return new Rectangle(0, rowOffsets[index] - (int)scrollOffset, ClientSize.Width, rowOffsets[index + 1] - rowOffsets[index]);
+        }
+
+        private void RefreshRows()
+        {
+            rowOffsets = new int[Items.Count + 1];
+            for (int i = 0; i < Items.Count; i++) rowOffsets[i + 1] = rowOffsets[i] + GetItemHeight(i);
+            scrollOffset = Math.Min(scrollOffset, MaxOffset);
+            if (minimap != null) minimap.RefreshRows();
+            Invalidate();
+        }
+
+        protected override void OnFontChanged(EventArgs e)
+        {
+            base.OnFontChanged(e);
+            if (Items != null && sectionFont != null) RefreshRows();
+            if (columnHeader != null) columnHeader.Invalidate();
+        }
+
+        private void ScrollTo(double value)
+        {
+            double next = Math.Max(0, Math.Min(MaxOffset, value));
+            if (scrollOffset == next) return;
+            scrollOffset = next;
+            hovered = -1;
+            tooltip.SetToolTip(this, null);
+            Invalidate();
+            if (minimap != null) minimap.Invalidate();
+        }
+
+        private void EnsureSelectionVisible()
+        {
+            if (selectedIndex < 0) return;
+            if (rowOffsets[selectedIndex] < scrollOffset) ScrollTo(rowOffsets[selectedIndex]);
+            else if (rowOffsets[selectedIndex + 1] > scrollOffset + ClientSize.Height)
+                ScrollTo(rowOffsets[selectedIndex + 1] - ClientSize.Height);
+        }
+
+        private void SelectRow(int index)
+        {
+            if (index < 0 || index >= Items.Count || Items[index].Gap) return;
+            bool changed = selectedIndex != index;
+            selectedIndex = index;
+            EnsureSelectionVisible();
+            Invalidate();
+            if (changed) OnSelectedIndexChanged(EventArgs.Empty);
         }
 
         public Control CreateMinimap()
         {
             minimap = new FileListMinimap(this) { Dock = DockStyle.Fill, Margin = Padding.Empty };
+            minimap.RefreshRows();
             tooltip.SetToolTip(minimap, "File overview: red deleted, green added, blue modified. Click or drag to scroll.");
             return minimap;
         }
@@ -130,13 +186,14 @@ namespace DiffTool
         private void DrawCell(Graphics graphics, string text, Rectangle bounds, Color color, bool rightAligned)
         {
             TextRenderer.DrawText(graphics, text, Font, bounds, color,
-                TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine |
+                TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.PreserveGraphicsClipping |
                 (rightAligned ? TextFormatFlags.Right | TextFormatFlags.EndEllipsis : TextFormatFlags.PathEllipsis));
         }
 
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
+            if (rowOffsets != null) ScrollTo(scrollOffset);
             Invalidate();
             if (columnHeader != null) columnHeader.Invalidate();
             if (minimap != null) minimap.RefreshRows();
@@ -152,11 +209,13 @@ namespace DiffTool
 
         private void Rebuild(bool notifySelection = true)
         {
+            EndSelectionDrag();
             FileChange previousSelection = SelectedChange;
             rebuilding = true;
-            BeginUpdate();
             Items.Clear();
-            wheelRemainder = 0;
+            selectedIndex = -1;
+            scrollOffset = 0;
+            searchPrefix = "";
             hovered = -1;
             tooltip.SetToolTip(this, null);
             FileCount = 0;
@@ -180,15 +239,15 @@ namespace DiffTool
                     if (previousFolder != null && !string.Equals(folder, previousFolder, StringComparison.OrdinalIgnoreCase))
                         Items.Add(new Row { Gap = true });
                     previousFolder = folder;
-                    int index = Items.Add(new Row { File = file, Group = group });
+                    int index = Items.Count;
+                    Items.Add(new Row { File = file, Group = group });
                     if (firstFile < 0) firstFile = index;
                     if (file.Path == selectedPath) selection = index;
                 }
             }
-            SelectedIndex = selection >= 0 ? selection : firstFile;
-            lastSelection = SelectedIndex;
-            EndUpdate();
-            if (minimap != null) minimap.RefreshRows();
+            selectedIndex = selection >= 0 ? selection : firstFile;
+            RefreshRows();
+            EnsureSelectionVisible();
             if (columnHeader != null) columnHeader.Invalidate();
             rebuilding = false;
             if (notifySelection || !ReferenceEquals(previousSelection, SelectedChange)) OnSelectedIndexChanged(EventArgs.Empty);
@@ -196,35 +255,48 @@ namespace DiffTool
 
         private static int Group(FileChange file) { return file.Status == 'D' ? 0 : file.Status == 'A' || file.Status == 'C' ? 1 : 2; }
 
-        protected override void OnMeasureItem(MeasureItemEventArgs e)
+        protected override void OnPaint(PaintEventArgs e)
         {
-            if (e.Index < 0 || e.Index >= Items.Count) { e.ItemHeight = Math.Max(20, Font.Height + 2); return; }
-            Row row = (Row)Items[e.Index];
-            e.ItemHeight = row.Gap ? Math.Max(4, Font.Height / 3) : Math.Max(20, (row.File == null ? sectionFont.Height : Font.Height) + 2);
+            base.OnPaint(e);
+            if (rebuilding || Items.Count == 0) return;
+            int first = RowAtOffset((int)scrollOffset);
+            for (int i = first; i < Items.Count; i++)
+            {
+                Rectangle bounds = GetItemRectangle(i);
+                if (bounds.Top >= ClientSize.Height) break;
+                if (!bounds.IntersectsWith(e.ClipRectangle)) continue;
+                var state = e.Graphics.Save();
+                e.Graphics.SetClip(bounds, System.Drawing.Drawing2D.CombineMode.Intersect);
+                DrawItem(e.Graphics, i, bounds);
+                e.Graphics.Restore(state);
+            }
+            // These are separate windows. During rapid input, another list paint
+            // can win priority before the minimap's queued paint is dispatched.
+            // Finish its pending paint with this frame, as DiffView does inline.
+            if (minimap != null) minimap.Update();
         }
 
-        protected override void OnDrawItem(DrawItemEventArgs e)
+        private void DrawItem(Graphics graphics, int index, Rectangle rowBounds)
         {
-            if (e.Index < 0 || e.Index >= Items.Count) return;
-            Row row = (Row)Items[e.Index];
-            bool selected = (e.State & DrawItemState.Selected) != 0 && !row.Gap;
-            using (var brush = new SolidBrush(selected ? Theme.HunkBackground : BackColor)) e.Graphics.FillRectangle(brush, e.Bounds);
+            Row row = Items[index];
+            bool selected = index == selectedIndex && !row.Gap;
+            using (var brush = new SolidBrush(selected ? Theme.HunkBackground : BackColor)) graphics.FillRectangle(brush, rowBounds);
             if (row.Gap) return;
             if (row.File == null)
             {
                 Color color = row.Group == 0 ? Theme.Red : row.Group == 1 ? Theme.Green : Theme.Blue;
-                Rectangle bounds = e.Bounds;
+                Rectangle bounds = rowBounds;
                 bounds.X += 2;
                 bounds.Width -= 4;
-                TextRenderer.DrawText(e.Graphics, row.Label, sectionFont, bounds, color,
-                    TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
+                TextRenderer.DrawText(graphics, row.Label, sectionFont, bounds, color,
+                    TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.PreserveGraphicsClipping);
             }
             else
             {
-                Rectangle[] columns = ColumnBounds(e.Bounds.Y, e.Bounds.Height);
-                DrawCell(e.Graphics, row.File.Path, columns[0], Theme.Text, false);
-                DrawCell(e.Graphics, row.File.DisplaySize, columns[1], Theme.Muted, true);
-                DrawCell(e.Graphics, row.File.LineCount.HasValue ? row.File.LineCount.Value.ToString("N0") : "—", columns[2], Theme.Muted, true);
+                Rectangle[] columns = ColumnBounds(rowBounds.Y, rowBounds.Height);
+                DrawCell(graphics, row.File.Path, columns[0], Theme.Text, false);
+                DrawCell(graphics, row.File.DisplaySize, columns[1], Theme.Muted, true);
+                DrawCell(graphics, row.File.LineCount.HasValue ? row.File.LineCount.Value.ToString("N0") : "—", columns[2], Theme.Muted, true);
                 if (row.File.AddedLines.HasValue && row.File.DeletedLines.HasValue)
                 {
                     Rectangle added = columns[3];
@@ -232,16 +304,17 @@ namespace DiffTool
                     Rectangle deleted = columns[3];
                     deleted.X += added.Width;
                     deleted.Width -= added.Width;
-                    DrawCell(e.Graphics, row.File.AddedLines.Value.ToString("N0"), added, Theme.Green, true);
-                    DrawCell(e.Graphics, row.File.DeletedLines.Value.ToString("N0"), deleted, Theme.Red, true);
+                    DrawCell(graphics, row.File.AddedLines.Value.ToString("N0"), added, Theme.Green, true);
+                    DrawCell(graphics, row.File.DeletedLines.Value.ToString("N0"), deleted, Theme.Red, true);
                 }
-                else DrawCell(e.Graphics, "—", columns[3], Theme.Muted, true);
+                else DrawCell(graphics, "—", columns[3], Theme.Muted, true);
             }
-            if (selected && Focused) e.DrawFocusRectangle();
+            if (selected && Focused) ControlPaint.DrawFocusRectangle(graphics, rowBounds, ForeColor, BackColor);
         }
 
         protected override void OnMouseDown(MouseEventArgs e)
         {
+            Focus();
             int index = HitTestRow(e.Location);
             if (index >= 0)
             {
@@ -253,20 +326,172 @@ namespace DiffTool
                     Toggle(row.Group);
                     return;
                 }
+                if (e.Button == MouseButtons.Left)
+                {
+                    draggingSelection = true;
+                    Capture = true;
+                    SelectRow(index);
+                }
             }
             base.OnMouseDown(e);
         }
 
+        private void EndSelectionDrag()
+        {
+            draggingSelection = false;
+            Capture = false;
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left) EndSelectionDrag();
+            base.OnMouseUp(e);
+        }
+
+        protected override void OnMouseCaptureChanged(EventArgs e)
+        {
+            if (!Capture) draggingSelection = false;
+            base.OnMouseCaptureChanged(e);
+        }
+
+        protected override void OnEnabledChanged(EventArgs e)
+        {
+            if (!Enabled) EndSelectionDrag();
+            base.OnEnabledChanged(e);
+        }
+
         protected override void OnKeyDown(KeyEventArgs e)
         {
+            base.OnKeyDown(e);
+            if (e.Handled) return;
             Row row = SelectedItem as Row;
             if (row != null && row.File == null && !row.Gap && (e.KeyCode == Keys.Space || e.KeyCode == Keys.Enter))
             {
                 Toggle(row.Group);
                 e.Handled = true;
+                e.SuppressKeyPress = true;
                 return;
             }
-            base.OnKeyDown(e);
+            int index = selectedIndex;
+            int direction = 1;
+            switch (e.KeyCode)
+            {
+                case Keys.Up: index--; direction = -1; break;
+                case Keys.Down: index++; break;
+                case Keys.Home: index = 0; break;
+                case Keys.End: index = Items.Count - 1; direction = -1; break;
+                case Keys.PageUp:
+                case Keys.PageDown:
+                    direction = e.KeyCode == Keys.PageUp ? -1 : 1;
+                    int origin = selectedIndex < 0 ? 0 : rowOffsets[selectedIndex];
+                    index = RowAtOffset(Math.Max(0, origin + direction * ClientSize.Height));
+                    break;
+                default: return;
+            }
+            while (index >= 0 && index < Items.Count && Items[index].Gap) index += direction;
+            SelectRow(index);
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+        }
+
+        protected override bool IsInputKey(Keys keyData)
+        {
+            Keys key = keyData & Keys.KeyCode;
+            return key == Keys.Up || key == Keys.Down || key == Keys.Home || key == Keys.End || key == Keys.PageUp || key == Keys.PageDown || base.IsInputKey(keyData);
+        }
+
+        protected override void OnKeyPress(KeyPressEventArgs e)
+        {
+            base.OnKeyPress(e);
+            if (e.Handled || char.IsControl(e.KeyChar) || Items.Count == 0) return;
+            int now = Environment.TickCount;
+            string letter = e.KeyChar.ToString();
+            searchPrefix = unchecked(now - searchTime) > 1000 || searchPrefix == letter ? letter : searchPrefix + letter;
+            searchTime = now;
+            int start = Math.Max(0, selectedIndex + (searchPrefix.Length == 1 ? 1 : 0));
+            for (int n = 0; n < Items.Count; n++)
+            {
+                int index = (start + n) % Items.Count;
+                if (!Items[index].Gap && Items[index].ToString().StartsWith(searchPrefix, StringComparison.CurrentCultureIgnoreCase))
+                {
+                    SelectRow(index);
+                    break;
+                }
+            }
+            e.Handled = true;
+        }
+
+        protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+        protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+
+        protected override AccessibleObject CreateAccessibilityInstance() { return new FileListAccessibleObject(this); }
+
+        private sealed class FileListAccessibleObject : ControlAccessibleObject
+        {
+            private readonly GroupedFileList owner;
+            public FileListAccessibleObject(GroupedFileList owner) : base(owner) { this.owner = owner; }
+            public override int GetChildCount() { return owner.Items.Count; }
+            public override AccessibleObject GetChild(int index)
+            {
+                return index < 0 || index >= owner.Items.Count ? null : new RowAccessibleObject(owner, owner.Items[index]);
+            }
+            public override AccessibleObject GetSelected() { return GetChild(owner.selectedIndex); }
+            public override AccessibleObject GetFocused() { return owner.Focused ? GetSelected() : null; }
+            public override AccessibleObject HitTest(int x, int y)
+            {
+                return GetChild(owner.HitTestRow(owner.PointToClient(new Point(x, y)))) ?? base.HitTest(x, y);
+            }
+        }
+
+        private sealed class RowAccessibleObject : AccessibleObject
+        {
+            private readonly GroupedFileList owner;
+            private readonly Row row;
+            private int Index { get { return owner.Items.IndexOf(row); } }
+            public RowAccessibleObject(GroupedFileList owner, Row row) { this.owner = owner; this.row = row; }
+            public override string Name { get { return row.ToString(); } set { } }
+            public override AccessibleRole Role { get { return row.Gap ? AccessibleRole.Separator : AccessibleRole.ListItem; } }
+            public override AccessibleObject Parent { get { return owner.AccessibilityObject; } }
+            public override Rectangle Bounds
+            {
+                get
+                {
+                    int index = Index;
+                    if (index < 0 || !owner.Visible) return Rectangle.Empty;
+                    Rectangle bounds = Rectangle.Intersect(owner.ClientRectangle, owner.GetItemRectangle(index));
+                    return bounds.Width <= 0 || bounds.Height <= 0 ? Rectangle.Empty : owner.RectangleToScreen(bounds);
+                }
+            }
+            public override AccessibleStates State
+            {
+                get
+                {
+                    AccessibleStates state = row.Gap ? AccessibleStates.None : AccessibleStates.Selectable | AccessibleStates.Focusable;
+                    if (!owner.Enabled) state |= AccessibleStates.Unavailable;
+                    if (Bounds.IsEmpty) state |= AccessibleStates.Offscreen;
+                    if (Index >= 0 && Index == owner.selectedIndex)
+                    {
+                        state |= AccessibleStates.Selected;
+                        if (owner.Focused) state |= AccessibleStates.Focused;
+                    }
+                    if (!row.Gap && row.File == null) state |= owner.collapsed.Contains(row.Group) && owner.filter.Length == 0 ? AccessibleStates.Collapsed : AccessibleStates.Expanded;
+                    return state;
+                }
+            }
+            public override string DefaultAction { get { return row.Gap ? "" : row.File == null ? "Toggle section" : "Select"; } }
+            public override void DoDefaultAction()
+            {
+                if (!owner.Enabled || Index < 0 || row.Gap) return;
+                owner.Focus();
+                if (row.File == null) owner.Toggle(row.Group);
+                else owner.SelectRow(Index);
+            }
+            public override void Select(AccessibleSelection flags)
+            {
+                if (!owner.Enabled || Index < 0 || row.Gap) return;
+                if ((flags & AccessibleSelection.TakeFocus) != 0) owner.Focus();
+                if ((flags & (AccessibleSelection.TakeSelection | AccessibleSelection.AddSelection)) != 0) owner.SelectRow(Index);
+            }
         }
 
         private void Toggle(int group)
@@ -275,25 +500,26 @@ namespace DiffTool
             Rebuild();
         }
 
-        protected override void OnSelectedIndexChanged(EventArgs e)
+        private void OnSelectedIndexChanged(EventArgs e)
         {
             if (rebuilding) return;
             Row row = SelectedItem as Row;
-            if (row != null && row.Gap)
-            {
-                int next = SelectedIndex + (SelectedIndex < lastSelection ? -1 : 1);
-                if (next >= 0 && next < Items.Count) SelectedIndex = next;
-                return;
-            }
-            lastSelection = SelectedIndex;
             if (row != null && row.File != null) selectedPath = row.File.Path;
-            base.OnSelectedIndexChanged(e);
+            AccessibilityNotifyClients(AccessibleEvents.Selection, selectedIndex);
+            if (SelectedIndexChanged != null) SelectedIndexChanged(this, e);
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
             int index = HitTestRow(e.Location);
+            if (draggingSelection && Capture &&
+                index >= 0 && index != selectedIndex && Items[index].File != null)
+            {
+                SelectRow(index);
+                // Selection can scroll the view or cause an event handler to rebuild it.
+                index = HitTestRow(e.Location);
+            }
             if (index == hovered) return;
             hovered = index;
             Row row = index >= 0 ? (Row)Items[index] : null;
@@ -305,23 +531,22 @@ namespace DiffTool
             var handled = e as HandledMouseEventArgs;
             if (handled != null) handled.Handled = true;
             base.OnMouseWheel(e);
-            if (rebuilding || Items.Count == 0) return;
-            wheelRemainder += e.Delta;
-            int notches = wheelRemainder / 120;
-            wheelRemainder %= 120;
-            int lines = SystemInformation.MouseWheelScrollLines;
-            if (notches == 0 || lines == 0) return;
-            if (lines < 0) lines = Math.Max(1, ClientSize.Height / Math.Max(20, Font.Height + 2));
-            if (hovered >= 0) { hovered = -1; tooltip.SetToolTip(this, null); }
-            // Set the final position once instead of animating native per-line scroll messages.
-            TopIndex = (int)Math.Max(0L, Math.Min(Items.Count - 1L, TopIndex - (long)notches * lines));
+            if (!Enabled || rebuilding || Items.Count == 0) return;
+            ScrollTo(WheelScroll.GetOffset(scrollOffset, MaxOffset, e.Delta,
+                SystemInformation.MouseWheelScrollLines, FileRowHeight, ClientSize.Height));
+        }
+
+        private int RowAtOffset(int offset)
+        {
+            int index = Array.BinarySearch(rowOffsets, offset);
+            if (index < 0) index = ~index - 1;
+            return Math.Max(0, Math.Min(Items.Count - 1, index));
         }
 
         private int HitTestRow(Point point)
         {
             if (rebuilding || Items.Count == 0 || !ClientRectangle.Contains(point)) return -1;
-            int index = IndexFromPoint(point);
-            // Native hit testing can return 65535 for no item or the nearest row in blank space.
+            int index = RowAtOffset(point.Y + (int)scrollOffset);
             return index >= 0 && index < Items.Count && GetItemRectangle(index).Contains(point) ? index : -1;
         }
 
@@ -365,8 +590,7 @@ namespace DiffTool
             {
                 dragging = false;
                 Capture = false;
-                offsets = new int[owner.Items.Count + 1];
-                for (int i = 0; i < owner.Items.Count; i++) offsets[i + 1] = offsets[i] + owner.GetItemHeight(i);
+                offsets = owner.rowOffsets;
                 ClearStrokes();
             }
 
@@ -380,10 +604,9 @@ namespace DiffTool
 
             private RectangleF Viewport()
             {
-                int index = owner.Items.Count == 0 ? 0 : Math.Max(0, Math.Min(owner.TopIndex, offsets.Length - 1));
-                int offset = offsets.Length == 0 ? 0 : Math.Min(MaxOffset, offsets[index]);
+                double offset = owner.scrollOffset;
                 float height = Math.Min(MapHeight, Math.Max(8, MapHeight * owner.ClientSize.Height / (float)Math.Max(1, TotalHeight)));
-                float y = MaxOffset == 0 ? 0 : (MapHeight - height) * offset / MaxOffset;
+                float y = MaxOffset == 0 ? 0 : (float)((MapHeight - height) * offset / MaxOffset);
                 return new RectangleF(1, MapTop + y, Math.Max(1, Width - 2), height);
             }
 
@@ -395,10 +618,7 @@ namespace DiffTool
                 if (strokes == null) BuildStrokes();
                 e.Graphics.DrawImageUnscaled(strokes, 0, MapTop);
                 if (MaxOffset == 0) return;
-                RectangleF viewport = Viewport();
-                using (var fill = new SolidBrush(Color.FromArgb(35, Theme.Blue))) e.Graphics.FillRectangle(fill, viewport);
-                using (var border = new Pen(Color.FromArgb(150, Theme.Blue)))
-                    e.Graphics.DrawRectangle(border, viewport.X, viewport.Y, viewport.Width - 1, Math.Max(1, viewport.Height - 1));
+                MinimapViewport.Draw(e.Graphics, Viewport());
             }
 
             private void BuildStrokes()
@@ -457,10 +677,7 @@ namespace DiffTool
                 float travel = MapHeight - Viewport().Height;
                 if (travel <= 0 || MaxOffset == 0 || offsets.Length < 2) return;
                 double fraction = Math.Max(0, Math.Min(1, (y - MapTop - dragOffset) / travel));
-                int target = (int)Math.Round(fraction * MaxOffset);
-                int index = Array.BinarySearch(offsets, target);
-                if (index < 0) index = ~index - (fraction >= 1 ? 0 : 1);
-                owner.TopIndex = Math.Max(0, Math.Min(owner.Items.Count - 1, index));
+                owner.ScrollTo(fraction * MaxOffset);
                 Invalidate();
             }
 

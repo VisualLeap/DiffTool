@@ -63,12 +63,14 @@ namespace DiffTool
         private int characterWidth;
         private int gutterWidth = 122;
         private const int MapWidth = 82;
-        private int topLine;
+        // Keep fractional rows so small trackpad deltas move by pixels, not whole lines.
+        private double topLine;
         private int pageRows = 1;
         private Bitmap minimap;
         private bool draggingMap;
         private float dragOffset;
-        private int MaxTopLine { get { return Math.Max(0, rows.Count - pageRows); } }
+        private double VisibleRows { get { return EditorHeight / (double)rowHeight; } }
+        private double MaxTopLine { get { return Math.Max(0, rows.Count - VisibleRows); } }
         private int EditorWidth { get { return Math.Max(1, Width - (rows.Count > 0 ? MapWidth : 0)); } }
         private int EditorHeight { get { return Math.Max(1, Height - (horizontal.Visible ? horizontal.Height : 0)); } }
         private int MapHeight { get { return Math.Max(1, Math.Min(Math.Max(1, Height - 8), rows.Count * 3)); } }
@@ -166,11 +168,13 @@ namespace DiffTool
                 return;
             }
             int glyphWidth = Math.Max(1, TextRenderer.MeasureText(e.Graphics, "M", codeFont, Size.Empty, TextFormatFlags.NoPadding).Width);
-            int visible = EditorHeight / rowHeight + 1;
-            for (int n = 0; n < visible && n + topLine < rows.Count; n++)
+            int firstLine = (int)topLine;
+            int pixelOffset = (int)((topLine - firstLine) * rowHeight);
+            int visible = (EditorHeight + pixelOffset + rowHeight - 1) / rowHeight;
+            for (int n = 0; n < visible && n + firstLine < rows.Count; n++)
             {
-                DiffLine row = rows[n + topLine];
-                int y = n * rowHeight;
+                DiffLine row = rows[n + firstLine];
+                int y = n * rowHeight - pixelOffset;
                 Color bg = row.Kind == '+' ? Theme.AddBackground : row.Kind == '-' ? Theme.DeleteBackground : row.Kind == '@' ? Theme.HunkBackground : BackColor;
                 Color fg = row.Kind == '+' ? Theme.Green : row.Kind == '-' ? Theme.Red : row.Kind == '@' ? Theme.Blue : row.Kind == 'm' ? Theme.Muted : Theme.Text;
                 using (var brush = new SolidBrush(bg)) e.Graphics.FillRectangle(brush, 0, y, EditorWidth, rowHeight);
@@ -205,17 +209,14 @@ namespace DiffTool
             int left = Width - MapWidth;
             using (var brush = new SolidBrush(Theme.Panel)) graphics.FillRectangle(brush, left, 0, MapWidth, Height);
             graphics.DrawImageUnscaled(minimap, left, 4);
-            RectangleF viewport = MapViewport();
-            using (var brush = new SolidBrush(Color.FromArgb(35, Theme.Blue))) graphics.FillRectangle(brush, viewport);
-            using (var pen = new Pen(Color.FromArgb(150, Theme.Blue)))
-                graphics.DrawRectangle(pen, viewport.X, viewport.Y, viewport.Width - 1, Math.Max(1, viewport.Height - 1));
+            MinimapViewport.Draw(graphics, MapViewport());
             using (var pen = new Pen(Theme.Border)) graphics.DrawLine(pen, left, 0, left, Height);
         }
 
         private RectangleF MapViewport()
         {
-            float height = Math.Min(MapHeight, Math.Max(8, MapHeight * pageRows / (float)Math.Max(1, rows.Count)));
-            float y = MaxTopLine == 0 ? 0 : (MapHeight - height) * topLine / MaxTopLine;
+            float height = (float)Math.Min(MapHeight, Math.Max(8, MapHeight * VisibleRows / Math.Max(1, rows.Count)));
+            float y = MaxTopLine == 0 ? 0 : (float)((MapHeight - height) * topLine / MaxTopLine);
             return new RectangleF(Width - MapWidth + 1, 4 + y, MapWidth - 2, height);
         }
 
@@ -301,12 +302,16 @@ namespace DiffTool
         private void ScrollFromMap(int y)
         {
             float travel = MapHeight - MapViewport().Height;
-            if (travel > 0) ScrollTo((int)Math.Round(Math.Max(0, Math.Min(1, (y - 4 - dragOffset) / travel)) * MaxTopLine));
+            if (travel > 0) ScrollTo(Math.Max(0, Math.Min(1, (y - 4 - dragOffset) / travel)) * MaxTopLine);
         }
         protected override void OnMouseWheel(MouseEventArgs e)
         {
+            var handled = e as HandledMouseEventArgs;
+            if (handled != null) handled.Handled = true;
             base.OnMouseWheel(e);
-            ScrollTo(topLine - e.Delta / 120 * 3);
+            if (!Enabled || rows.Count == 0) return;
+            ScrollTo(WheelScroll.GetOffset(topLine * rowHeight, MaxTopLine * rowHeight, e.Delta,
+                SystemInformation.MouseWheelScrollLines, rowHeight, EditorHeight) / rowHeight);
         }
         protected override bool IsInputKey(Keys keyData)
         {
@@ -323,7 +328,13 @@ namespace DiffTool
             if (e.KeyCode == Keys.Home) ScrollTo(0);
             if (e.KeyCode == Keys.End) ScrollTo(MaxTopLine);
         }
-        private void ScrollTo(int value) { topLine = Math.Max(0, Math.Min(value, MaxTopLine)); Invalidate(); }
+        private void ScrollTo(double value)
+        {
+            double next = Math.Max(0, Math.Min(value, MaxTopLine));
+            if (next == topLine) return;
+            topLine = next;
+            Invalidate();
+        }
         protected override void Dispose(bool disposing)
         {
             if (disposing) { codeFont.Dispose(); if (minimap != null) minimap.Dispose(); }

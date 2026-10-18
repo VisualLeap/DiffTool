@@ -1,7 +1,7 @@
 @echo off
 setlocal
 if not exist "%~dp0bin\DiffTool.exe" (
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0build.ps1"
+    call "%~dp0build.bat"
     if errorlevel 1 (
         pause
         exit /b 1
