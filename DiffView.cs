@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
 
@@ -69,6 +71,12 @@ namespace DiffTool
         private Bitmap minimap;
         private bool draggingMap;
         private float dragOffset;
+        // Selection endpoints are columns in DisplayText. The anchor stays put while the caret follows the mouse.
+        private int anchorLine, anchorColumn, caretLine, caretColumn;
+        private bool selecting;
+        private readonly Timer dragScrollTimer = new Timer { Interval = 40 };
+        private const int TextPadding = 12;
+        private const TextFormatFlags CodeFlags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
         private double VisibleRows { get { return EditorHeight / (double)rowHeight; } }
         private double MaxTopLine { get { return Math.Max(0, rows.Count - VisibleRows); } }
         private int EditorWidth { get { return Math.Max(1, Width - (rows.Count > 0 ? MapWidth : 0)); } }
@@ -92,6 +100,7 @@ namespace DiffTool
                 Invalidate(new Rectangle(gutterWidth, 0, Math.Max(1, EditorWidth - gutterWidth), EditorHeight));
                 if (horizontal.Capture) Update();
             };
+            dragScrollTimer.Tick += delegate { DragScroll(); };
             EmptyTitle = "Select a file to review";
             EmptyDetail = "Deleted lines appear in red. Added lines appear in green.";
             RawDiff = "";
@@ -133,10 +142,16 @@ namespace DiffTool
             contentWidth = (int)Math.Min(int.MaxValue / 2, (long)maxLength * characterWidth + 32);
             topLine = 0;
             draggingMap = false;
+            selecting = false;
+            dragScrollTimer.Stop();
+            anchorLine = anchorColumn = caretLine = caretColumn = 0;
             Capture = false;
             if (minimap != null) { minimap.Dispose(); minimap = null; }
             horizontal.Value = 0;
             UpdateScrollbars();
+            // Center the first changed row after the visible page size is known.
+            int firstChange = rows.FindIndex(row => row.Kind == '+' || row.Kind == '-');
+            if (firstChange >= 0) ScrollTo(firstChange + 0.5 - VisibleRows / 2);
             Invalidate();
         }
 
@@ -171,6 +186,9 @@ namespace DiffTool
             int firstLine = (int)topLine;
             int pixelOffset = (int)((topLine - firstLine) * rowHeight);
             int visible = (EditorHeight + pixelOffset + rowHeight - 1) / rowHeight;
+            int startLine, startColumn, endLine, endColumn;
+            bool hasSelection = SelectionRange(out startLine, out startColumn, out endLine, out endColumn);
+            using (var selectionBrush = new SolidBrush(Theme.Selection))
             for (int n = 0; n < visible && n + firstLine < rows.Count; n++)
             {
                 DiffLine row = rows[n + firstLine];
@@ -181,12 +199,22 @@ namespace DiffTool
                 var state = e.Graphics.Save();
                 e.Graphics.SetClip(new Rectangle(gutterWidth, y, Math.Max(1, EditorWidth - gutterWidth), rowHeight), System.Drawing.Drawing2D.CombineMode.Intersect);
                 string text = row.DisplayText;
-                int textX = gutterWidth + 12 - horizontal.Value;
+                int textX = gutterWidth + TextPadding - horizontal.Value;
+                int line = n + firstLine;
+                if (hasSelection && line >= startLine && line <= endLine)
+                {
+                    int from = line == startLine ? startColumn : MarkerLength(row);
+                    int to = line == endLine ? endColumn : text.Length;
+                    // Extend past the last character when the line break itself is selected.
+                    int left = Math.Max(gutterWidth, textX + ColumnOffset(row, from, glyphWidth));
+                    int right = Math.Min(EditorWidth, textX + ColumnOffset(row, to, glyphWidth) + (line < endLine ? glyphWidth : 0));
+                    if (right > left) e.Graphics.FillRectangle(selectionBrush, left, y, right - left, rowHeight);
+                }
                 if (row.FixedWidthText)
                 {
                     // Consolas ASCII cells have a fixed advance. Avoid laying out off-screen text.
                     // Keep Unicode runs intact so shaping and fallback fonts retain their spacing.
-                    int first = Math.Min(text.Length, Math.Max(0, (horizontal.Value - 12) / glyphWidth - 1));
+                    int first = Math.Min(text.Length, Math.Max(0, (horizontal.Value - TextPadding) / glyphWidth - 1));
                     int count = Math.Min(text.Length - first, (Math.Max(1, EditorWidth - gutterWidth) / glyphWidth) + 4);
                     text = text.Substring(first, count);
                     textX += first * glyphWidth;
@@ -276,7 +304,24 @@ namespace DiffTool
         {
             base.OnMouseDown(e);
             Focus();
-            if (e.Button != MouseButtons.Left || rows.Count == 0 || e.X < Width - MapWidth) return;
+            if (e.Button != MouseButtons.Left || rows.Count == 0) return;
+            if (e.X < Width - MapWidth)
+            {
+                int line, column;
+                PositionAt(e.Location, out line, out column);
+                if (e.Clicks == 2) SelectWord(line, column);
+                else
+                {
+                    caretLine = line;
+                    caretColumn = column;
+                    if ((ModifierKeys & Keys.Shift) == 0) { anchorLine = line; anchorColumn = column; }
+                    selecting = true;
+                    Capture = true;
+                    dragScrollTimer.Start();
+                }
+                Invalidate();
+                return;
+            }
             RectangleF viewport = MapViewport();
             dragOffset = viewport.Contains(e.Location) ? e.Y - viewport.Y : viewport.Height / 2;
             draggingMap = true;
@@ -286,18 +331,157 @@ namespace DiffTool
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
-            Cursor = rows.Count > 0 && e.X >= Width - MapWidth ? Cursors.Hand : Cursors.Default;
+            if (selecting) { Cursor = Cursors.IBeam; MoveCaretTo(e.Location); return; }
+            Cursor = rows.Count == 0 || draggingMap ? (draggingMap ? Cursors.Hand : Cursors.Default)
+                : e.X >= Width - MapWidth ? Cursors.Hand
+                : e.X >= gutterWidth && e.Y < EditorHeight ? Cursors.IBeam : Cursors.Default;
             if (draggingMap) ScrollFromMap(e.Y);
         }
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
-            if (e.Button == MouseButtons.Left) { draggingMap = false; Capture = false; }
+            if (e.Button == MouseButtons.Left) { draggingMap = false; StopSelecting(); Capture = false; }
         }
         protected override void OnMouseCaptureChanged(EventArgs e)
         {
             base.OnMouseCaptureChanged(e);
-            if (!Capture) draggingMap = false;
+            if (!Capture) { draggingMap = false; StopSelecting(); }
+        }
+        private void StopSelecting()
+        {
+            selecting = false;
+            dragScrollTimer.Stop();
+        }
+        private void MoveCaretTo(Point point)
+        {
+            int line, column;
+            PositionAt(point, out line, out column);
+            if (line == caretLine && column == caretColumn) return;
+            caretLine = line;
+            caretColumn = column;
+            Invalidate();
+        }
+        // Keep extending the selection while the pointer is held outside the text area.
+        private void DragScroll()
+        {
+            if (!selecting || rows.Count == 0) { dragScrollTimer.Stop(); return; }
+            Point point = PointToClient(MousePosition);
+            if (point.Y < 0) ScrollTo(topLine - Math.Min(pageRows, 1 + -point.Y / rowHeight));
+            else if (point.Y >= EditorHeight) ScrollTo(topLine + Math.Min(pageRows, 1 + (point.Y - EditorHeight) / rowHeight));
+            if (horizontal.Visible)
+            {
+                int last = Math.Max(0, horizontal.Maximum - horizontal.LargeChange + 1);
+                if (point.X < gutterWidth) horizontal.Value = Math.Max(0, horizontal.Value - 40);
+                else if (point.X >= EditorWidth) horizontal.Value = Math.Min(last, horizontal.Value + 40);
+            }
+            MoveCaretTo(point);
+        }
+
+        // Diff markers (+, -, or the context space) are not selectable, so copied code pastes cleanly.
+        private static int MarkerLength(DiffLine row)
+        {
+            return row.Kind == '+' || row.Kind == '-' || row.Kind == ' ' ? 1 : 0;
+        }
+        private int ColumnOffset(DiffLine row, int column, int glyphWidth)
+        {
+            if (row.FixedWidthText) return column * glyphWidth;
+            return column <= 0 ? 0 : TextRenderer.MeasureText(row.DisplayText.Substring(0, column), codeFont, Size.Empty, CodeFlags).Width;
+        }
+        private void PositionAt(Point point, out int line, out int column)
+        {
+            line = (int)Math.Floor(topLine + point.Y / (double)rowHeight);
+            if (line < 0) { line = 0; column = MarkerLength(rows[0]); return; }
+            if (line >= rows.Count) { line = rows.Count - 1; column = rows[line].DisplayText.Length; return; }
+            DiffLine row = rows[line];
+            string text = row.DisplayText;
+            int x = point.X - gutterWidth - TextPadding + horizontal.Value;
+            if (row.FixedWidthText) column = (int)Math.Round(x / (double)characterWidth);
+            else
+            {
+                int low = 0, high = text.Length;
+                while (low < high)
+                {
+                    int middle = (low + high + 1) / 2;
+                    if (ColumnOffset(row, middle, characterWidth) <= x) low = middle; else high = middle - 1;
+                }
+                column = low;
+                if (column < text.Length && x - ColumnOffset(row, column, characterWidth) > ColumnOffset(row, column + 1, characterWidth) - x) column++;
+                if (column > 0 && column < text.Length && char.IsLowSurrogate(text[column])) column++;
+            }
+            column = Math.Max(MarkerLength(row), Math.Min(text.Length, column));
+        }
+        private static int CharacterClass(char c)
+        {
+            return char.IsLetterOrDigit(c) || c == '_' ? 0 : char.IsWhiteSpace(c) ? 1 : 2;
+        }
+        private void SelectWord(int line, int column)
+        {
+            DiffLine row = rows[line];
+            string text = row.DisplayText;
+            int minimum = MarkerLength(row);
+            anchorLine = caretLine = line;
+            anchorColumn = caretColumn = column;
+            if (text.Length <= minimum) return;
+            int start = Math.Min(column, text.Length - 1), end = start + 1;
+            int kind = CharacterClass(text[start]);
+            while (start > minimum && CharacterClass(text[start - 1]) == kind) start--;
+            while (end < text.Length && CharacterClass(text[end]) == kind) end++;
+            anchorColumn = start;
+            caretColumn = end;
+        }
+        private bool SelectionRange(out int startLine, out int startColumn, out int endLine, out int endColumn)
+        {
+            bool forward = anchorLine < caretLine || (anchorLine == caretLine && anchorColumn <= caretColumn);
+            startLine = forward ? anchorLine : caretLine;
+            startColumn = forward ? anchorColumn : caretColumn;
+            endLine = forward ? caretLine : anchorLine;
+            endColumn = forward ? caretColumn : anchorColumn;
+            return rows.Count > 0 && (startLine != endLine || startColumn != endColumn);
+        }
+        // DisplayText expands tabs to four columns; map back so copies keep the original characters.
+        private static int SourceIndex(DiffLine row, int column)
+        {
+            int display = 0;
+            for (int i = 0; i < row.Text.Length; i++)
+            {
+                if (display >= column) return i;
+                display += row.Text[i] == '\t' ? 4 : 1;
+            }
+            return row.Text.Length;
+        }
+        public string SelectedText
+        {
+            get
+            {
+                int startLine, startColumn, endLine, endColumn;
+                if (!SelectionRange(out startLine, out startColumn, out endLine, out endColumn)) return "";
+                var text = new StringBuilder();
+                for (int line = startLine; line <= endLine; line++)
+                {
+                    DiffLine row = rows[line];
+                    int from = SourceIndex(row, line == startLine ? startColumn : MarkerLength(row));
+                    int to = SourceIndex(row, line == endLine ? endColumn : row.DisplayText.Length);
+                    if (to > from) text.Append(row.Text, from, to - from);
+                    if (line < endLine) text.Append("\r\n");
+                }
+                return text.ToString();
+            }
+        }
+        public void SelectAll()
+        {
+            if (rows.Count == 0) return;
+            anchorLine = 0;
+            anchorColumn = MarkerLength(rows[0]);
+            caretLine = rows.Count - 1;
+            caretColumn = rows[caretLine].DisplayText.Length;
+            Invalidate();
+        }
+        public void CopySelection()
+        {
+            string text = SelectedText;
+            if (text.Length == 0) return;
+            try { Clipboard.SetText(text); }
+            catch (ExternalException) { }
         }
         private void ScrollFromMap(int y)
         {
@@ -321,6 +505,8 @@ namespace DiffTool
         protected override void OnKeyDown(KeyEventArgs e)
         {
             base.OnKeyDown(e);
+            if (e.Control && !e.Alt && (e.KeyCode == Keys.C || e.KeyCode == Keys.Insert)) { e.SuppressKeyPress = true; CopySelection(); }
+            if (e.Control && !e.Alt && e.KeyCode == Keys.A) { e.SuppressKeyPress = true; SelectAll(); }
             if (e.KeyCode == Keys.Up) ScrollTo(topLine - 1);
             if (e.KeyCode == Keys.Down) ScrollTo(topLine + 1);
             if (e.KeyCode == Keys.PageUp) ScrollTo(topLine - pageRows);
@@ -337,7 +523,7 @@ namespace DiffTool
         }
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { codeFont.Dispose(); if (minimap != null) minimap.Dispose(); }
+            if (disposing) { dragScrollTimer.Dispose(); codeFont.Dispose(); if (minimap != null) minimap.Dispose(); }
             base.Dispose(disposing);
         }
     }

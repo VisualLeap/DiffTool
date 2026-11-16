@@ -101,8 +101,14 @@ namespace DiffTool
             int code;
             Run(new[] { "rev-parse", "--verify", "HEAD" }, out code);
             if (code == 0) return "HEAD";
-            // Calculate the empty tree for this repository's object format, without writing it.
-            return Run(new[] { "hash-object", "-t", "tree", "--stdin" }).Trim();
+            return EmptyTree();
+        }
+
+        // Calculate the empty tree for this repository's object format, without writing it.
+        // Hash an empty file rather than stdin, which the framework may prefix with a byte-order mark.
+        private string EmptyTree()
+        {
+            return Run(new[] { "hash-object", "-t", "tree", "/dev/null" }).Trim();
         }
 
         public List<GitBranch> Branches()
@@ -133,6 +139,39 @@ namespace DiffTool
                 commits.Add(new GitCommit { Id = fields[i], Date = fields[i + 1], Subject = fields[i + 2] });
             return commits;
         }
+        public GitRepository WorkingCheckout(string reference)
+        {
+            if (reference == "HEAD") return this;
+            if (reference == null || !reference.StartsWith("refs/heads/", StringComparison.Ordinal)) return null;
+
+            string path = null, branch = null, match = null;
+            bool prunable = false;
+            foreach (string field in Run(new[] { "worktree", "list", "--porcelain", "-z" }).Split('\0'))
+            {
+                if (field.StartsWith("worktree ", StringComparison.Ordinal)) path = field.Substring(9);
+                else if (field.StartsWith("branch ", StringComparison.Ordinal)) branch = field.Substring(7);
+                else if (field == "prunable" || field.StartsWith("prunable ", StringComparison.Ordinal)) prunable = true;
+                else if (field.Length == 0)
+                {
+                    if (branch == reference && !prunable && path != null)
+                    {
+                        if (match != null) throw new InvalidOperationException("This branch has multiple worktrees. Open the desired folder directly and select Current checkout.");
+                        match = path;
+                    }
+                    path = branch = null;
+                    prunable = false;
+                }
+            }
+            if (match == null) return null;
+            if (!Directory.Exists(match)) throw new InvalidOperationException("The selected branch's worktree is unavailable: " + match);
+            var checkout = new GitRepository(match);
+            // A stale worktree directory can silently resolve to its parent repository.
+            if (!string.Equals(System.IO.Path.GetFullPath(checkout.Root), System.IO.Path.GetFullPath(match), StringComparison.OrdinalIgnoreCase)
+                || checkout.Run(new[] { "symbolic-ref", "HEAD" }).TrimEnd('\r', '\n') != reference)
+                throw new InvalidOperationException("The selected branch's worktree has changed. Refresh and select the branch again.");
+            return checkout;
+        }
+
         private List<string> DiffArguments(ChangeScope scope, string commit = null)
         {
             var args = new List<string> { "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--find-renames" };
@@ -140,7 +179,7 @@ namespace DiffTool
             {
                 if (commit == null || !Regex.IsMatch(commit, @"\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z")) throw new ArgumentException("Select a commit to review.");
                 string[] ancestors = Run(new[] { "rev-list", "--parents", "-n", "1", commit, "--" }).Trim().Split(' ');
-                args.Add(ancestors.Length > 1 ? ancestors[1] : Run(new[] { "hash-object", "-t", "tree", "--stdin" }).Trim());
+                args.Add(ancestors.Length > 1 ? ancestors[1] : EmptyTree());
                 args.Add(commit);
                 return args;
             }
@@ -331,7 +370,7 @@ namespace DiffTool
             var start = GitStart(new[] { "cat-file", "blob", objectId });
             using (var process = Process.Start(start))
             {
-                process.StandardInput.Close();
+                CloseInput(process);
                 Task<string> error = process.StandardError.ReadToEndAsync();
                 Task<long?> count = Task.Run(() =>
                 {
@@ -422,8 +461,7 @@ namespace DiffTool
             {
                 Task<string> output = process.StandardOutput.ReadToEndAsync();
                 Task<string> error = process.StandardError.ReadToEndAsync();
-                if (input != null) process.StandardInput.Write(input);
-                process.StandardInput.Close();
+                CloseInput(process, input);
                 if (!process.WaitForExit(30000))
                 {
                     process.Kill();
@@ -431,6 +469,19 @@ namespace DiffTool
                 }
                 exitCode = process.ExitCode;
                 return exitCode == 0 ? output.Result : error.Result;
+            }
+        }
+
+        // When the console code page is UTF-8, the framework has already sent a byte-order mark to stdin.
+        // End that line so the mark cannot corrupt the first line of input; line-based readers skip it.
+        private static void CloseInput(Process process, string input = null)
+        {
+            bool marked = process.StandardInput.Encoding.GetPreamble().Length > 0;
+            using (Stream stream = process.StandardInput.BaseStream)
+            {
+                if (input == null) return;
+                byte[] bytes = new UTF8Encoding(false).GetBytes((marked ? "\n" : "") + input);
+                stream.Write(bytes, 0, bytes.Length);
             }
         }
 

@@ -30,7 +30,7 @@ Build output and test screenshots go in `bin/`, which is excluded from Git. Repo
 The application icon is `assets/DiffTool.ico`; replace that file and rebuild to update the executable, window, and taskbar icons.
 ## Review changes
 
-- **Branch:** choose a local or remote-tracking branch to browse its history and latest commit. This does not check out the branch; working-change comparisons still use the current checkout.
+- **Branch:** choose a local or remote-tracking branch to browse its history. Working-change comparisons follow the selected local branch's registered worktree; the path above the selectors and checkout name in the footer identify the source. **Current checkout** uses the originally opened folder. Branches without an available worktree support commit history only; working-change comparisons show an explanation. Selecting a branch preserves the selected working-change comparison and never checks out or modifies files.
 - **All working changes:** compares HEAD with the working folder, including staged and untracked files. Staged changes subsequently reversed in the working folder have no net diff in this view; use the staged view to inspect the index.
 - **Staged changes:** compares HEAD with the index.
 - **Unstaged changes:** compares the index with the working folder and includes untracked files.
@@ -45,9 +45,10 @@ The application icon is `assets/DiffTool.ico`; replace that file and rebuild to 
 - The app opens in a normal window and remembers its last position and size across launches.
 - Filter the list by path, select a file, and scroll the diff. The file-list pane starts at 34.155% of the window width (subject to minimum pane sizes). Drag the divider to resize the panes. The two number columns show the old and new line numbers.
 - Toggle **Full file** at the far right of the file header to include all unchanged lines alongside red deletions and green additions. Turn it off to return to changes with nearby context. The toggle carries across file selections and comparison views.
-- The right-hand minimap shows tiny strokes for file contents, with red deletions and green additions. Click to jump or drag the highlighted viewport to scroll; mouse-wheel, trackpad, and keyboard scrolling also work. It follows the current compact/full-file view.
+- File diffs open with the first added or removed line centered vertically when there is enough surrounding content, in both compact and full-file views. The right-hand minimap shows tiny strokes for file contents, with red deletions and green additions. Click to jump or drag the highlighted viewport to scroll; mouse-wheel, trackpad, and keyboard scrolling also work. It follows the current compact/full-file view.
 - Both panes and their minimaps use the same direct, pixel-level wheel/trackpad scrolling. Every input event moves the view immediately, retaining fractional movement and following the Windows line/page scrolling setting. There is no added animation or momentum; dragging and keyboard navigation also respond directly.
 - Long source lines use a dark horizontal scrollbar. Drag the thumb or click the track; when focused, arrow keys, Page Up/Down, Home, and End also scroll horizontally.
+- Drag in the diff to select text, double-click to select a word, or Shift+click to extend; dragging past an edge scrolls. **Ctrl+C** copies the selection and **Ctrl+A** selects the whole diff. The `+`/`-` markers and line numbers are left out, so copied code pastes cleanly.
 - **Copy diff**, beside the filename, copies the selected file's full diff. **F5** refreshes after you change files outside the app. **Ctrl+O** opens a repository; **Ctrl+F** focuses the filter.
 
 Binary and empty files show explanatory messages. Untracked text previews assume UTF-8 and are limited to 2 MB. Tracked diff previews are limited to 4 MB; copying retains the complete Git output. Unmerged files may use Git's combined-diff format, shown as text without per-line numbers. The viewer does not stage, modify, discard, or commit files.

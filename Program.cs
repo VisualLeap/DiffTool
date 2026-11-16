@@ -25,6 +25,7 @@ namespace DiffTool
         public static readonly Color AddBackground = Color.FromArgb(23, 54, 40);
         public static readonly Color DeleteBackground = Color.FromArgb(63, 31, 39);
         public static readonly Color HunkBackground = Color.FromArgb(29, 42, 63);
+        public static readonly Color Selection = Color.FromArgb(46, 84, 138);
     }
 
     internal static class Program
@@ -43,6 +44,7 @@ namespace DiffTool
     public sealed class DiffForm : Form
     {
         private readonly Icon appIcon;
+        private readonly Label repositoryHeading = new Label();
         private readonly Label repositoryLabel = new Label();
         private readonly ComboBox branchBox = new ComboBox();
         private bool updatingBranches;
@@ -67,6 +69,8 @@ namespace DiffTool
         private readonly ContextMenuStrip recentMenu = new ContextMenuStrip();
         private readonly Button recentButton;
         private GitRepository repository;
+        private GitRepository loadedRepository;
+        private string changesError;
         private List<FileChange> changes = new List<FileChange>();
         private int refreshVersion;
         private int diffVersion;
@@ -115,7 +119,12 @@ namespace DiffTool
             heading.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
             heading.RowStyles.Add(new RowStyle(SizeType.Absolute, 25));
             heading.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
-            heading.Controls.Add(new Label { Text = "DiffTool", Font = new Font("Segoe UI", 19f, FontStyle.Bold), AutoSize = true, Margin = Padding.Empty });
+            repositoryHeading.Text = "DiffTool";
+            repositoryHeading.Font = new Font("Segoe UI", 19f, FontStyle.Bold);
+            repositoryHeading.Dock = DockStyle.Fill;
+            repositoryHeading.AutoEllipsis = true;
+            repositoryHeading.Margin = Padding.Empty;
+            heading.Controls.Add(repositoryHeading);
             repositoryLabel.Text = "Open a Git repository to get started";
             repositoryLabel.ForeColor = Theme.Muted;
             repositoryLabel.Dock = DockStyle.Fill;
@@ -133,7 +142,7 @@ namespace DiffTool
             branchBox.FlatStyle = FlatStyle.Flat;
             branchBox.Margin = Padding.Empty;
             branchBox.AccessibleName = "Branch history";
-            tooltip.SetToolTip(branchBox, "Choose a local or remote branch to view its commits. Working-change comparisons always use the current checkout.");
+            tooltip.SetToolTip(branchBox, "Choose a branch to view its commits. Working-change comparisons use that branch's worktree, when available. Current checkout uses the opened folder.");
             branchBox.SelectedIndexChanged += async delegate { if (!updatingBranches) await LoadCommits(false, true); };
             branchRow.Controls.Add(branchBox);
             heading.Controls.Add(branchRow);
@@ -439,7 +448,10 @@ namespace DiffTool
                 updatingCommits = false;
                 repositoryLabel.Text = opened.Root;
                 tooltip.SetToolTip(repositoryLabel, opened.Root);
-                Text = Path.GetFileName(opened.Root) + " — DiffTool";
+                string repositoryName = Path.GetFileName(opened.Root);
+                repositoryHeading.Text = string.IsNullOrEmpty(repositoryName) ? opened.Root : repositoryName;
+                tooltip.SetToolTip(repositoryHeading, repositoryHeading.Text);
+                Text = repositoryHeading.Text + " — DiffTool";
                 bool historySaved = recentRepositories.Remember(opened.Root);
                 UpdateRecentMenu();
                 // Refresh the new repository before filtering; never load an old path from it.
@@ -474,7 +486,8 @@ namespace DiffTool
             GitCommit selected = branchChanged ? null : scopeBox.SelectedItem as GitCommit;
             GitBranch selectedBranch = branchBox.SelectedItem as GitBranch;
             string reference = selectedBranch == null ? "HEAD" : selectedBranch.Reference;
-            int workingIndex = !branchChanged && selected == null && scopeBox.SelectedIndex < 3 ? Math.Max(0, scopeBox.SelectedIndex) : 0;
+            bool workingSelection = scopeBox.SelectedIndex < 3;
+            int workingIndex = workingSelection ? Math.Max(0, scopeBox.SelectedIndex) : 0;
             int existingCount = scopeBox.Items.OfType<GitCommit>().Count();
             int skip = append ? existingCount : 0;
             int count = append ? 200 : branchChanged ? 100 : Math.Max(100, existingCount);
@@ -521,7 +534,7 @@ namespace DiffTool
                     if (selected != null)
                         for (int i = 3; i < scopeBox.Items.Count; i++)
                             if (((GitCommit)scopeBox.Items[i]).Id == selected.Id) { index = i; break; }
-                    scopeBox.SelectedIndex = branchChanged && scopeBox.Items.Count > 3 ? 3 : index >= 0 ? index : Math.Min(2, workingIndex);
+                    scopeBox.SelectedIndex = branchChanged && !workingSelection && scopeBox.Items.Count > 3 ? 3 : index >= 0 ? index : Math.Min(2, workingIndex);
                 }
                 finally { scopeBox.EndUpdate(); updatingCommits = false; }
                 olderButton.Visible = commits.Count == count;
@@ -557,35 +570,53 @@ namespace DiffTool
             ++diffVersion;
             GitRepository current = repository;
             GitCommit selectedCommit = scopeBox.SelectedItem as GitCommit;
+            GitBranch selectedBranch = branchBox.SelectedItem as GitBranch;
+            string reference = selectedBranch == null ? "HEAD" : selectedBranch.Reference;
             ChangeScope scope = selectedCommit != null ? ChangeScope.Commit : (ChangeScope)Math.Max(0, scopeBox.SelectedIndex);
             string commit = scope == ChangeScope.Commit && selectedCommit != null ? selectedCommit.Id : null;
             FileChange selected = SelectedChange;
+            loadedRepository = null;
+            changesError = null;
             IsIdle = false;
             refreshing = true;
             refreshButton.Enabled = false;
             fileList.Enabled = false;
             copyButton.Enabled = false;
             statusLabel.Text = "Reading Git changes…";
+            repositoryLabel.Text = scope == ChangeScope.Commit ? current.Root : "Resolving working folder…";
+            tooltip.SetToolTip(repositoryLabel, repositoryLabel.Text);
             diffView.ShowMessage("Reading changes…", "");
             try
             {
-                var result = await Task.Run(() => new { Files = scope == ChangeScope.Commit && commit == null ? new List<FileChange>() : current.Changes(scope, commit), Branch = current.Branch() });
+                var result = await Task.Run(() =>
+                {
+                    GitRepository source = scope == ChangeScope.Commit ? current : current.WorkingCheckout(reference);
+                    if (source == null)
+                        throw new InvalidOperationException("The selected branch has no available local worktree. Select a commit to review its history, or select Current checkout to view the opened folder's changes.");
+                    return new { Repository = source, Files = source.Changes(scope, commit), Branch = source.Branch() };
+                });
                 if (IsDisposed || version != refreshVersion) return;
                 changes = result.Files;
                 loadedScope = scope;
                 loadedCommit = commit;
-                tooltip.SetToolTip(repositoryLabel, current.Root + "\nWorking checkout: " + result.Branch);
+                loadedRepository = result.Repository;
+                repositoryLabel.Text = result.Repository.Root;
+                tooltip.SetToolTip(repositoryLabel, result.Repository.Root + "\nWorking checkout: " + result.Branch);
                 refreshing = false;
                 ApplyFilter(selected == null ? null : selected.Path);
                 int added = changes.Count(c => c.Status == 'A');
                 int deleted = changes.Count(c => c.Status == 'D');
                 statusLabel.Text = string.Format("{0} files  ·  {1} added  ·  {2} modified / other  ·  {3} deleted  |  {4}", changes.Count, added, changes.Count - added - deleted, deleted,
                     scope == ChangeScope.Commit ? commit == null ? "No commits in this repository" : "Commit " + commit.Substring(0, 8) + " compared with its first parent (empty tree for initial commit)" : scope == ChangeScope.WorkingTree ? "HEAD → working folder (includes staged and untracked)" : scope == ChangeScope.Staged ? "HEAD → index" : "Index → working folder (includes untracked)");
+                if (scope != ChangeScope.Commit) statusLabel.Text += "  |  Checkout: " + result.Branch;
             }
             catch (Exception error)
             {
                 if (IsDisposed || version != refreshVersion) return;
                 changes.Clear();
+                changesError = error.Message;
+                repositoryLabel.Text = scope == ChangeScope.Commit ? current.Root : "Working folder unavailable · " + (selectedBranch == null ? "Current checkout" : selectedBranch.Name);
+                tooltip.SetToolTip(repositoryLabel, repositoryLabel.Text);
                 refreshing = false;
                 ApplyFilter(null);
                 diffView.ShowMessage("Could not read changes", error.Message);
@@ -623,10 +654,10 @@ namespace DiffTool
             FileChange selected = SelectedChange;
             copyButton.Enabled = false;
             lineStats.Text = "";
-            if (selected == null || repository == null)
+            if (selected == null || loadedRepository == null)
             {
                 fileLabel.Text = "File preview";
-                diffView.ShowMessage(changes.Count == 0 ? "No changes in this view" : "No matching files", changes.Count == 0 ? "Choose another comparison or refresh after making changes." : "Try a different file filter.");
+                diffView.ShowMessage(changesError != null ? "Could not read changes" : changes.Count == 0 ? "No changes in this view" : "No matching files", changesError ?? (changes.Count == 0 ? "Choose another comparison or refresh after making changes." : "Try a different file filter."));
                 IsIdle = true;
                 return;
             }
@@ -634,7 +665,7 @@ namespace DiffTool
             fileLabel.Text = selected.OldPath == null ? selected.Path : selected.OldPath + " → " + selected.Path;
             tooltip.SetToolTip(fileLabel, fileLabel.Text);
             diffView.ShowMessage("Loading diff…", selected.Path);
-            GitRepository current = repository;
+            GitRepository current = loadedRepository;
             ChangeScope scope = loadedScope;
             string commit = loadedCommit;
             bool fullFile = fullFileToggle.Checked;
